@@ -1,5 +1,5 @@
 """
-Coalition Membership Verifier — Sustainable Silicon Valley edition
+Coalition Membership Verifier
 ------------------------------------------------------------------
 Verifies that known member companies appear in archived snapshots of a
 coalition membership page (via the Wayback Machine) at 3-year intervals
@@ -18,7 +18,7 @@ Input CSV format (matches sustainable_silicon_valley_members.csv):
 Usage
 -----
     1. Edit the CONFIG block near the top of this file.
-    2. Run:  python coalition_verifier.py
+    2. Run:  python3 coalition_verifier.py
 
 Dependencies
 ------------
