@@ -1,5 +1,5 @@
 """
-Coalition Membership Verifier
+Coalition Membership Verifier — Sustainable Silicon Valley edition
 ------------------------------------------------------------------
 Verifies that known member companies appear in archived snapshots of a
 coalition membership page (via the Wayback Machine) at 3-year intervals
@@ -18,11 +18,11 @@ Input CSV format (matches sustainable_silicon_valley_members.csv):
 Usage
 -----
     1. Edit the CONFIG block near the top of this file.
-    2. Run:  python3 coalition_verifier.py
+    2. Run:  python coalition_verifier.py
 
 Dependencies
 ------------
-    pip install requests beautifulsoup4 rapidfuzz pandas tqdm
+    pip install requests beautifulsoup4 rapidfuzz pandas openpyxl tqdm
 """
 
 import re
@@ -32,6 +32,7 @@ import logging
 from datetime import datetime, date
 from dataclasses import dataclass, field
 from typing import Optional
+import os
 
 import requests
 from bs4 import BeautifulSoup
@@ -58,8 +59,9 @@ log = logging.getLogger(__name__)
 # URL of the coalition's membership page (live or canonical)
 COALITION_URL = "https://www.wp.sustainablesv.org/members/"
 
-# Path to your CSV of known members (SSV format: all_name_match, group, source1-4 …)
+# Path to your members file (CSV or Excel; SSV format: all_name_match, group, source1-4 …)
 MEMBERS_CSV = "sustainable silicon valley members - sustainable silicon valley members.csv"
+# Note: also supports .xlsx format
 
 # When to check — pick ONE of the two options below and comment out the other:
 #
@@ -74,9 +76,9 @@ START_DATE = "2016-05-11"
 
 # -- Output -----------------------------------------------------------------
 
-# Prefix for output files:
-#   <OUTPUT_PREFIX>_verification.csv   — one row per member x snapshot
-#   <OUTPUT_PREFIX>_new_members.csv    — candidate new members not in your list
+# Prefix for output files (all saved as .xlsx Excel format):
+#   <OUTPUT_PREFIX>_verification.xlsx  — one row per member x snapshot
+#   <OUTPUT_PREFIX>_new_members.xlsx   — candidate new members not in your list
 OUTPUT_PREFIX = "results"
 
 # -- Optional ---------------------------------------------------------------
@@ -302,17 +304,29 @@ def _find_new_candidates(members: list, raw_blocks: list) -> list:
 
 
 # ---------------------------------------------------------------------------
-# CSV loader — understands the SSV schema
+# CSV/Excel loader — understands the SSV schema
 # ---------------------------------------------------------------------------
+
+def _detect_file_format(path: str) -> str:
+    """Detect file format from extension."""
+    _, ext = os.path.splitext(path.lower())
+    if ext in ['.xlsx', '.xls']:
+        return 'excel'
+    return 'csv'
 
 def load_members_csv(path: str) -> list:
     """
-    Parse the SSV-style CSV:
+    Parse the SSV-style CSV or Excel file:
         Columns: all_name_match, group, source1-4, links
 
+    Supports both .csv and .xlsx formats.
     Returns a list of dicts: {canonical, aliases, sources}
     """
-    df = pd.read_csv(path, dtype=str).fillna("")
+    file_format = _detect_file_format(path)
+    if file_format == 'excel':
+        df = pd.read_excel(path, dtype=str).fillna("")
+    else:
+        df = pd.read_csv(path, dtype=str).fillna("")
 
     # Find canonical-name column
     canon_col = None
@@ -487,8 +501,13 @@ def to_ssv_format(
     valid_snaps = [s for s in results if not s.error and s.member_results]
     valid_snaps.sort(key=lambda s: s.year)
 
-    # --- Load original CSV for name/group lookup only ------------------------
-    orig_df   = pd.read_csv(original_csv, dtype=str).fillna("")
+    # --- Load original file for name/group lookup only (supports CSV and Excel) ------
+    file_format = _detect_file_format(original_csv)
+    if file_format == 'excel':
+        orig_df = pd.read_excel(original_csv, dtype=str).fillna("")
+    else:
+        orig_df = pd.read_csv(original_csv, dtype=str).fillna("")
+    
     canon_col = next(
         (c for c in ["all_name_match", "canonical", "member", "company", "name"]
          if c in orig_df.columns),
@@ -619,19 +638,19 @@ def save_results(
     original_csv:  str  = None,
 ) -> None:
     ver_df, new_df = to_dataframes(results)
-    ver_path = f"{output_prefix}_verification.csv"
-    new_path = f"{output_prefix}_new_members.csv"
-    ssv_path = f"{output_prefix}_updated_members.csv"
+    ver_path = f"{output_prefix}_verification.xlsx"
+    new_path = f"{output_prefix}_new_members.xlsx"
+    ssv_path = f"{output_prefix}_updated_members.xlsx"
 
-    ver_df.to_csv(ver_path, index=False)
-    new_df.to_csv(new_path, index=False)
+    ver_df.to_excel(ver_path, index=False, engine='openpyxl')
+    new_df.to_excel(new_path, index=False, engine='openpyxl')
     log.info("Saved → %s", ver_path)
     log.info("Saved → %s", new_path)
 
-    # Third file: updated CSV in original SSV format
+    # Third file: updated Excel in original SSV format
     if known_members is not None and original_csv is not None:
         ssv_df = to_ssv_format(results, known_members, original_csv)
-        ssv_df.to_csv(ssv_path, index=False)
+        ssv_df.to_excel(ssv_path, index=False, engine='openpyxl')
         log.info("Saved → %s", ssv_path)
     else:
         ssv_path = None
