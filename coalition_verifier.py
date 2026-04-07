@@ -29,10 +29,10 @@ import re
 import time
 import json
 import logging
+import os
 from datetime import datetime, date
 from dataclasses import dataclass, field
 from typing import Optional
-import os
 
 import requests
 from bs4 import BeautifulSoup
@@ -57,11 +57,10 @@ log = logging.getLogger(__name__)
 # -- Required ---------------------------------------------------------------
 
 # URL of the coalition's membership page (live or canonical)
-COALITION_URL = "https://www.wp.sustainablesv.org/members/"
+COALITION_URL = "http://www.presidentsclimatecommitment.org/signatories/list"
 
-# Path to your members file (CSV or Excel; SSV format: all_name_match, group, source1-4 …)
-MEMBERS_CSV = "sustainable silicon valley members - sustainable silicon valley members.csv"
-# Note: also supports .xlsx format
+# Path to your members file — supports .csv or .xlsx
+MEMBERS_CSV = "american college and university presidents' climate commitment members.xlsx"
 
 # When to check — pick ONE of the two options below and comment out the other:
 #
@@ -72,11 +71,11 @@ MEMBERS_CSV = "sustainable silicon valley members - sustainable silicon valley m
 #       START_DATE = [2007, 2012, 2016, 2019, 2022]
 #       (INTERVAL_YEARS is ignored when START_DATE is a list)
 #
-START_DATE = "2016-05-11"
+START_DATE = "2010-06-09"
 
 # -- Output -----------------------------------------------------------------
 
-# Prefix for output files (all saved as .xlsx Excel format):
+# Prefix for output files (saved as .xlsx):
 #   <OUTPUT_PREFIX>_verification.xlsx  — one row per member x snapshot
 #   <OUTPUT_PREFIX>_new_members.xlsx   — candidate new members not in your list
 OUTPUT_PREFIX = "results"
@@ -91,8 +90,8 @@ INTERVAL_YEARS = 3
 #   >= SCORE_UNCERTAIN  →  "uncertain"  (flag for manual review)
 #   <  SCORE_UNCERTAIN  →  "not_found"
 # Raise thresholds to reduce false positives; lower to catch more variants.
-SCORE_CONFIRMED = 30
-SCORE_UNCERTAIN = 10
+SCORE_CONFIRMED = 99
+SCORE_UNCERTAIN = 95
 
 # ===========================================================================
 # Internal constants — no need to edit below this line
@@ -107,10 +106,10 @@ POLITENESS_DELAY   = 1.5    # seconds between Wayback requests
 
 # Candidate-block filters
 BLOCK_MAX_WORDS      = 12
-NEW_MEMBER_MIN_WORDS = 2
+NEW_MEMBER_MIN_WORDS = 1
 
 # HTML tags scanned for member names
-CANDIDATE_TAGS = ["li", "a", "td", "p", "div", "span", "h3", "h4", "h5", "alt", "title"]
+CANDIDATE_TAGS = ["li", "a", "td", "p", "div", "span", "h3", "h4", "h5"]
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -304,26 +303,24 @@ def _find_new_candidates(members: list, raw_blocks: list) -> list:
 
 
 # ---------------------------------------------------------------------------
-# CSV/Excel loader — understands the SSV schema
+# CSV loader — understands the SSV schema
 # ---------------------------------------------------------------------------
 
 def _detect_file_format(path: str) -> str:
-    """Detect file format from extension."""
+    """Return 'excel' for .xlsx/.xls files, 'csv' otherwise."""
     _, ext = os.path.splitext(path.lower())
-    if ext in ['.xlsx', '.xls']:
-        return 'excel'
-    return 'csv'
+    return "excel" if ext in (".xlsx", ".xls") else "csv"
+
 
 def load_members_csv(path: str) -> list:
     """
     Parse the SSV-style CSV or Excel file:
         Columns: all_name_match, group, source1-4, links
 
-    Supports both .csv and .xlsx formats.
+    Supports both .csv and .xlsx/.xls formats.
     Returns a list of dicts: {canonical, aliases, sources}
     """
-    file_format = _detect_file_format(path)
-    if file_format == 'excel':
+    if _detect_file_format(path) == "excel":
         df = pd.read_excel(path, dtype=str).fillna("")
     else:
         df = pd.read_csv(path, dtype=str).fillna("")
@@ -501,13 +498,11 @@ def to_ssv_format(
     valid_snaps = [s for s in results if not s.error and s.member_results]
     valid_snaps.sort(key=lambda s: s.year)
 
-    # --- Load original file for name/group lookup only (supports CSV and Excel) ------
-    file_format = _detect_file_format(original_csv)
-    if file_format == 'excel':
+    # --- Load original file for name/group lookup only -----------------------
+    if _detect_file_format(original_csv) == "excel":
         orig_df = pd.read_excel(original_csv, dtype=str).fillna("")
     else:
         orig_df = pd.read_csv(original_csv, dtype=str).fillna("")
-    
     canon_col = next(
         (c for c in ["all_name_match", "canonical", "member", "company", "name"]
          if c in orig_df.columns),
@@ -521,10 +516,17 @@ def to_ssv_format(
         if key:
             orig_lookup[key] = row
 
-    # --- Source columns: one per snapshot, numbered from 1 -------------------
-    new_years    = [s.year for s in valid_snaps]
-    src_cols     = [f"source{i + 1}" for i in range(len(new_years))]
-    src_numbers  = list(range(1, len(new_years) + 1))   # 1, 2, 3, …
+    # --- All attempted years (including failed snapshots) --------------------
+    # Use every year from results so we get one column per configured year,
+    # not just the ones where the fetch succeeded.
+    all_years = sorted(set(s.year for s in results))
+    src_cols  = [f"source_{year}" for year in all_years]   # e.g. source_2016, source_2019
+
+    # Map year → source number (1-based, chronological)
+    year_to_num = {year: i + 1 for i, year in enumerate(all_years)}
+
+    # Map year → snapshot error status
+    year_error = {s.year: bool(s.error) for s in results}
 
     # --- Build lookup: canonical → {year: status} ----------------------------
     member_year_status = {}
@@ -543,9 +545,12 @@ def to_ssv_format(
             row["group"] = orig_row.get(group_col, canonical) if hasattr(orig_row, "get") else canonical
 
         year_status = member_year_status.get(canonical, {})
-        for col, year, num in zip(src_cols, new_years, src_numbers):
-            status = year_status.get(year, "not_found")
-            row[col] = str(num) if status in ("confirmed", "uncertain") else ""
+        for col, year in zip(src_cols, all_years):
+            if year_error.get(year):
+                row[col] = "error"
+            else:
+                status = year_status.get(year, "not_found")
+                row[col] = str(year_to_num[year]) if status == "confirmed" else ""
 
         rows.append(row)
 
@@ -559,8 +564,8 @@ def to_ssv_format(
         row = {"all_name_match": cand}
         if group_col:
             row["group"] = cand
-        for col, year, num in zip(src_cols, new_years, src_numbers):
-            row[col] = str(num) if year_seen.get(year) else ""
+        for col, year in zip(src_cols, all_years):
+            row[col] = str(year_to_num[year]) if year_seen.get(year) else ""
         rows.append(row)
 
     # --- Assemble DataFrame ---------------------------------------------------
@@ -642,15 +647,15 @@ def save_results(
     new_path = f"{output_prefix}_new_members.xlsx"
     ssv_path = f"{output_prefix}_updated_members.xlsx"
 
-    ver_df.to_excel(ver_path, index=False, engine='openpyxl')
-    new_df.to_excel(new_path, index=False, engine='openpyxl')
+    ver_df.to_excel(ver_path, index=False, engine="openpyxl")
+    new_df.to_excel(new_path, index=False, engine="openpyxl")
     log.info("Saved → %s", ver_path)
     log.info("Saved → %s", new_path)
 
-    # Third file: updated Excel in original SSV format
+    # Third file: updated CSV in original SSV format
     if known_members is not None and original_csv is not None:
         ssv_df = to_ssv_format(results, known_members, original_csv)
-        ssv_df.to_excel(ssv_path, index=False, engine='openpyxl')
+        ssv_df.to_excel(ssv_path, index=False, engine="openpyxl")
         log.info("Saved → %s", ssv_path)
     else:
         ssv_path = None
@@ -710,7 +715,10 @@ def save_results(
     # Pull existing links from original CSV if available
     if original_csv is not None:
         try:
-            orig = pd.read_csv(original_csv, dtype=str).fillna("")
+            if _detect_file_format(original_csv) == "excel":
+                orig = pd.read_excel(original_csv, dtype=str).fillna("")
+            else:
+                orig = pd.read_csv(original_csv, dtype=str).fillna("")
             if "links" in orig.columns:
                 raw_links = orig["links"].dropna()
                 raw_links = raw_links[raw_links.str.strip() != ""]
@@ -723,20 +731,22 @@ def save_results(
         except Exception:
             pass
 
-    # New sources from this run
-    valid_snaps = sorted(
-        [s for s in results if not s.error and s.member_results],
-        key=lambda s: s.year,
-    )
-    if valid_snaps:
+    # New sources from this run — show all attempted years
+    snap_by_year = {s.year: s for s in results}
+    all_run_years = sorted(snap_by_year.keys())
+    if all_run_years:
         print("  (from this run)")
-        for i, snap in enumerate(valid_snaps):
-            src_num = i + 1
-            try:
-                src_date = datetime.strptime(snap.timestamp[:8], "%Y%m%d").strftime("%-m.%-d.%Y")
-            except Exception:
-                src_date = str(snap.year)
-            print(f"    {src_num} - {snap.snapshot_url}  {src_date}")
+        for year in all_run_years:
+            snap = snap_by_year[year]
+            src_num = list(all_run_years).index(year) + 1
+            if snap.error:
+                print(f"    {src_num} - [no snapshot available for {year}]")
+            else:
+                try:
+                    src_date = datetime.strptime(snap.timestamp[:8], "%Y%m%d").strftime("%-m.%-d.%Y")
+                except Exception:
+                    src_date = str(year)
+                print(f"    {src_num} - {snap.snapshot_url}  {src_date}")
 
 
 def to_json(results: list) -> str:
